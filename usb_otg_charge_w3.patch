@@ -1,0 +1,1237 @@
+diff -urH msm_orig/arch/arm/configs/flo_defconfig msm/arch/arm/configs/flo_defconfig
+--- msm_orig/arch/arm/configs/flo_defconfig	2019-03-17 15:14:20.039318070 +0100
++++ msm/arch/arm/configs/flo_defconfig	2019-03-17 21:29:19.118295324 +0100
+@@ -540,3 +540,5 @@
+ CONFIG_SECURITY_SELINUX=y
+ CONFIG_CRYPTO_AES_ARM=y
+ CONFIG_CRYPTO_TWOFISH=y
++CONFIG_USBHOST=y
++
+diff -urH msm_orig/arch/arm/mach-msm/Kconfig msm/arch/arm/mach-msm/Kconfig
+--- msm_orig/arch/arm/mach-msm/Kconfig	2019-03-17 15:14:20.111316531 +0100
++++ msm/arch/arm/mach-msm/Kconfig	2019-03-17 21:29:19.114295411 +0100
+@@ -2625,4 +2625,10 @@
+ 	help
+ 	Faster memcpy performance for Krait
+ 
++config USBHOST  # tmtmtm
++	bool "USBHOST related runtime configuration"
++	default y
++ 	help
++ 	  A simple sysfs interface to allow switching between OTG and FI mode.
++
+ endif
+diff -urH msm_orig/arch/arm/mach-msm/Makefile msm/arch/arm/mach-msm/Makefile
+--- msm_orig/arch/arm/mach-msm/Makefile	2019-03-17 15:14:20.111316531 +0100
++++ msm/arch/arm/mach-msm/Makefile	2019-03-17 21:29:19.114295411 +0100
+@@ -393,5 +393,6 @@
+ obj-$(CONFIG_DEBUG_FS) += msm_cpr-debug.o
+ endif
+ obj-$(CONFIG_MSM_CPU_PWRCTL) +=  msm_cpu_pwrctl.o
++obj-$(CONFIG_USBHOST)        += usbhost.o        # tmtmtm
+ 
+ obj-$(CONFIG_HAS_MACH_MEMUTILS) += memutils/
+Only in msm/arch/arm/mach-msm: Makefile.orig
+diff -urH msm_orig/arch/arm/mach-msm/pm-8x60.c msm/arch/arm/mach-msm/pm-8x60.c
+--- msm_orig/arch/arm/mach-msm/pm-8x60.c	2019-03-17 15:14:20.159315504 +0100
++++ msm/arch/arm/mach-msm/pm-8x60.c	2019-03-17 22:23:15.625633182 +0100
+@@ -115,6 +115,11 @@
+ 		"standalone_power_collapse",
+ };
+ 
++
++// tmtmtm
++#include "linux/time.h"  // getnstimeofday(), timespec
++extern volatile unsigned long  usbhost_wake_in_suspend_total_ms;
++
+ static struct hrtimer pm_hrtimer;
+ static struct msm_pm_sleep_ops pm_sleep_ops;
+ /*
+@@ -959,6 +964,10 @@
+ 		msm_pm_swfi();
+ }
+ 
++// tmtmtm
++struct timespec wakeStartTP;        // todo: must set wakeStartTP.tv_sec=0 on power loss / or start suspend
++struct timespec wakeEndTP;
++
+ #ifdef CONFIG_PM_DEBUG
+ static void msm_show_suspend_time(int64_t time)
+ {
+@@ -1003,8 +1012,30 @@
+ 		int ret = -ENODEV;
+ 		uint32_t power;
+ 
++
++		// tmtmtm: going back to deep sleep
++		unsigned long wakeInSuspendDurationMs = 0l;
++		struct timespec wakeInSuspendDurationTP;
++		getnstimeofday(&wakeEndTP);
++		pr_info("#:# wakeStartTP.tv_sec %lu, nsec %lu\n", 
++			wakeStartTP.tv_sec, wakeStartTP.tv_nsec/NSEC_PER_MSEC);
++		pr_info("#:# wakeEndTP.tv_sec   %lu, nsec %lu\n", 
++			wakeEndTP.tv_sec, wakeEndTP.tv_nsec/NSEC_PER_MSEC);
++		if(wakeStartTP.tv_sec>0l && wakeStartTP.tv_sec<=wakeEndTP.tv_sec) {
++			wakeInSuspendDurationTP = timespec_sub(wakeEndTP,wakeStartTP);
++			wakeInSuspendDurationMs = wakeInSuspendDurationTP.tv_sec *1000l + (wakeInSuspendDurationTP.tv_nsec/NSEC_PER_MSEC);
++			usbhost_wake_in_suspend_total_ms += wakeInSuspendDurationMs;
++			pr_info("#:# wakeInSuspendDurationTP.tv_sec %lu, nsec %lu\n", 
++				wakeInSuspendDurationTP.tv_sec, wakeInSuspendDurationTP.tv_nsec/NSEC_PER_MSEC);
++		}
+ 		if (MSM_PM_DEBUG_SUSPEND & msm_pm_debug_mask)
+ 			pr_info("%s: power collapse\n", __func__);
++			// tmtmtm
++			if(wakeStartTP.tv_sec>0l) {
++				pr_info("#:# wakeInSuspendDurationMs %lu, total %lu\n", wakeInSuspendDurationMs, usbhost_wake_in_suspend_total_ms);
++				
++				wakeStartTP.tv_sec = 0l;
++			}
+ 
+ 		clock_debug_print_enabled();
+ 
+@@ -1040,6 +1071,20 @@
+ 		msm_pm_add_stat(MSM_PM_STAT_SUSPEND, time);
+ #ifdef CONFIG_PM_DEBUG
+ 		msm_show_suspend_time(time);
++		//msm_show_suspend_time(time);		// "Suspended for "
++
++		{
++    		// tmtmtm: brief wake-up from deep sleep
++			struct timespec suspend_time = {0, 0};
++			timespec_add_ns(&suspend_time, time);
++			pr_info("Suspended for %lu.%03lu seconds wake_in_suspend_total_ms=%lu\n", suspend_time.tv_sec,
++				suspend_time.tv_nsec / NSEC_PER_MSEC, usbhost_wake_in_suspend_total_ms);
++
++			getnstimeofday(&wakeStartTP);
++			wakeStartTP.tv_sec += suspend_time.tv_sec;
++			pr_info("#:# wakeStartTP.tv_sec %lu, nsec %lu\n", 
++				wakeStartTP.tv_sec, wakeStartTP.tv_nsec/NSEC_PER_MSEC);
++		}
+ #endif
+ 	} else if (allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE]) {
+ 		if (MSM_PM_DEBUG_SUSPEND & msm_pm_debug_mask)
+Only in msm/arch/arm/mach-msm: usbhost.c
+Only in msm/arch/x86/tools: relocs
+diff -urH msm_orig/drivers/input/misc/powermate.c msm/drivers/input/misc/powermate.c
+--- msm_orig/drivers/input/misc/powermate.c	2019-03-17 15:14:18.619348434 +0100
++++ msm/drivers/input/misc/powermate.c	2019-03-17 21:29:19.114295411 +0100
+@@ -104,7 +104,19 @@
+ 
+ 	/* handle updates to device state */
+ 	input_report_key(pm->input, BTN_0, pm->data[0] & 0x01);
+-	input_report_rel(pm->input, REL_DIAL, pm->data[1]);
++
++	// LEFT
++	if ((int)pm->data[1] == -1) {
++		input_report_key(pm->input, KEY_UP, 1);
++		input_report_key(pm->input, KEY_UP, 0);
++	}
++
++	// RIGHT
++	if ((int)pm->data[1] == 1) {
++		input_report_key(pm->input, KEY_DOWN, 1);
++		input_report_key(pm->input, KEY_DOWN, 0);
++	}
++
+ 	input_sync(pm->input);
+ 
+ exit:
+@@ -361,11 +373,11 @@
+ 
+ 	input_dev->event = powermate_input_event;
+ 
+-	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL) |
+-		BIT_MASK(EV_MSC);
+-	input_dev->keybit[BIT_WORD(BTN_0)] = BIT_MASK(BTN_0);
+-	input_dev->relbit[BIT_WORD(REL_DIAL)] = BIT_MASK(REL_DIAL);
++	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_MSC);
++	input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_0);
+ 	input_dev->mscbit[BIT_WORD(MSC_PULSELED)] = BIT_MASK(MSC_PULSELED);
++	input_dev->keybit[BIT_WORD(KEY_DOWN)] |= BIT_MASK(KEY_DOWN);
++	input_dev->keybit[BIT_WORD(KEY_UP)] |= BIT_MASK(KEY_UP);
+ 
+ 	/* get a handle to the interrupt data pipe */
+ 	pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
+@@ -444,7 +456,18 @@
+         .id_table =     powermate_devices,
+ };
+ 
+-module_usb_driver(powermate_driver);
++static int __init powermate_init(void)
++{
++	return usb_register(&powermate_driver);
++}
++
++static void __exit powermate_cleanup(void)
++{
++	usb_deregister(&powermate_driver);
++}
++
++module_init(powermate_init);
++module_exit(powermate_cleanup);
+ 
+ MODULE_AUTHOR( "William R Sowerbutts" );
+ MODULE_DESCRIPTION( "Griffin Technology, Inc PowerMate driver" );
+diff -urH msm_orig/drivers/power/bq27541_battery.c msm/drivers/power/bq27541_battery.c
+--- msm_orig/drivers/power/bq27541_battery.c	2019-03-17 15:14:19.251334920 +0100
++++ msm/drivers/power/bq27541_battery.c	2019-03-18 19:24:03.780245429 +0100
+@@ -4,6 +4,7 @@
+  * Gas Gauge driver for TI's BQ27541
+  *
+  * Copyright (c) 2012, ASUSTek Inc.
++ * Copyright (c) 2016, Timur Mehrvarz
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -76,7 +77,7 @@
+ static unsigned int  battery_remaining_capacity;
+ struct workqueue_struct *bq27541_battery_work_queue = NULL;
+ static unsigned int battery_check_interval = BATTERY_POLLING_RATE;
+-static char *status_text[] = {"Unknown", "Charging", "Discharging", "Not charging", "Full"};
++//static char *status_text[] = {"Unknown", "Charging", "Discharging", "Not charging", "Full"};
+ 
+ /* Functions declaration */
+ static int bq27541_get_psp(int reg_offset, enum power_supply_property psp,union power_supply_propval *val);
+@@ -86,6 +87,9 @@
+ extern int smb345_config_thermal_charging(int temp, int volt, int rule);
+ extern void reconfig_AICL(void);
+ 
++extern int usbhost_charging_ma;
++extern int usbhost_fetching_ma;
++
+ module_param(battery_current, uint, 0644);
+ module_param(battery_remaining_capacity, uint, 0644);
+ 
+@@ -459,6 +463,7 @@
+ 
+ 	if(!bq27541_battery_driver_ready) {
+ 		BAT_NOTICE("battery driver not ready\n");
++		printk("bq27541_battery_callback !bq27541_battery_driver_ready\n");
+ 		return 0;
+ 	}
+ 
+@@ -468,6 +473,13 @@
+        printk("========================================================\n");
+ 	printk("bq27541_battery_callback  usb_cable_state = %x\n", usb_cable_state) ;
+        printk("========================================================\n");
++ 
++       if(usb_cable_state==0)
++            usbhost_fetching_ma = 0;
++       else
++       if(usb_cable_state==1)
++            usbhost_fetching_ma = 1200;
++
+ 
+ 	if (old_cable_status != bq27541_battery_cable_status) {
+ 		printk(KERN_INFO"battery_callback cable_wake_lock 5 sec...\n ");
+@@ -559,12 +571,12 @@
+ 		} else {
+ 			val->intval = bq27541_device->bat_vol;
+ 		}
+-		BAT_NOTICE("voltage_now= %u uV\n", val->intval);
++		//BAT_NOTICE("voltage_now= %u uV\n", val->intval);
+ 	}
+ 	if (psp == POWER_SUPPLY_PROP_STATUS) {
+ 		ret = bq27541_device->bat_status = rt_value;
+ 
+-		if ((ac_on || usb_on || wireless_on) && !otg_on) {/* Charging detected */
++		if ((ac_on || usb_on || wireless_on) /*&& !otg_on*/) {/* Charging detected */
+ 			if (bq27541_device->old_capacity == 100) {
+ 				val->intval = POWER_SUPPLY_STATUS_FULL;
+ 			} else {
+@@ -575,7 +587,7 @@
+ 		} else {
+ 			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+ 		}
+-		BAT_NOTICE("status: %s ret= 0x%04x\n", status_text[val->intval], ret);
++		//BAT_NOTICE("status: %s ret= 0x%04x\n", status_text[val->intval], ret);
+ 
+ 	} else if (psp == POWER_SUPPLY_PROP_TEMP) {
+ 		ret = bq27541_device->bat_temp = rt_value;
+@@ -604,11 +616,12 @@
+ 		}
+ 
+ 		bq27541_device->old_temperature = val->intval = ret;
+-		BAT_NOTICE("temperature= %d (0.1¢XC)\n", val->intval);
++		//BAT_NOTICE("temperature= %d (0.1¢XC)\n", val->intval);
+ 	}
+ 	if (psp == POWER_SUPPLY_PROP_CURRENT_NOW) {
+ 		val->intval = bq27541_device->bat_current
+ 			= bq27541_battery_current();
++		usbhost_charging_ma = val->intval;
+ 		BAT_NOTICE("current = %d mA\n", val->intval);
+ 	}
+ 	return 0;
+@@ -707,7 +720,7 @@
+ 	bq27541_device->old_capacity = val->intval;
+ 	bq27541_device->cap_err=0;
+ 
+-	BAT_NOTICE("= %u%% ret= %u\n", val->intval, ret);
++	//BAT_NOTICE("= %u%% ret= %u\n", val->intval, ret);
+ 	return 0;
+ }
+ 
+@@ -768,8 +781,10 @@
+ 
+ 	BAT_NOTICE("+ client->addr= %02x\n", client->addr);
+ 	bq27541_device = kzalloc(sizeof(*bq27541_device), GFP_KERNEL);
+-	if (!bq27541_device)
++	if (!bq27541_device) {
++		printk("bq27541_probe -ENOMEM\n");
+ 		return -ENOMEM;
++	}
+ 
+ 	memset(bq27541_device, 0, sizeof(*bq27541_device));
+ 	bq27541_device->client = client;
+@@ -789,6 +804,7 @@
+ 			while (i--)
+ 				power_supply_unregister(&bq27541_supply[i]);
+ 				kfree(bq27541_device);
++			printk("bq27541_probe ret=%d\n",ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -806,6 +822,7 @@
+ 	/* Register sysfs */
+ 	ret = sysfs_create_group(&client->dev.kobj, &battery_smbus_group);
+ 	if (ret) {
++		printk("bq27541_probe unable to create the sysfs\n");
+ 		dev_err(&client->dev, "bq27541_probe: unable to create the sysfs\n");
+ 	}
+ 
+Only in msm/drivers/power: bq27541_battery.c.orig
+diff -urH msm_orig/drivers/power/smb345-charger.c msm/drivers/power/smb345-charger.c
+--- msm_orig/drivers/power/smb345-charger.c	2019-03-17 15:14:19.255334834 +0100
++++ msm/drivers/power/smb345-charger.c	2019-03-18 23:00:14.937052084 +0100
+@@ -4,6 +4,7 @@
+   * Charger driver for Summit SMB345
+   *
+   * Copyright (c) 2012, ASUSTek Inc.
++  * Copyright (c) 2016, Timur Mehrvarz
+   *
+   * This program is free software; you can redistribute it and/or modify
+   * it under the terms of the GNU General Public License as published by
+@@ -133,6 +134,20 @@
+ static bool wpc_en;
+ static bool disable_DCIN;
+ 
++extern int usbhost_fixed_install_mode;
++extern int usbhost_fastcharge_in_host_mode;
++extern int usbhost_hostmode;
++extern int usbhost_charging_state;
++extern volatile int usbhost_external_power;
++extern volatile int usbhost_charge_slave_devices;
++extern volatile unsigned long usbhost_wake_in_suspend_total_ms;
++extern int usbhost_fetching_ma;
++extern int usbhost_poweroff_counter;
++#define MAX_FETCH_MA 1500
++
++extern struct timespec wakeStartTP; // from arch/arm/mach-msm/pm-8x60.c
++extern bool otg_plugged;
++struct timespec lastPowerOn;
+ /* Sysfs interface */
+ static DEVICE_ATTR(reg_status, S_IWUSR | S_IRUGO, smb345_reg_show, NULL);
+ 
+@@ -413,6 +428,7 @@
+ 	else
+ 		charger->curr_limit = 2000;
+ 
++    usbhost_fetching_ma = charger->curr_limit;
+ 	if (current_setting > 900) {
+ 		charger->time_of_1800mA_limit = jiffies;
+ 	} else{
+@@ -453,7 +469,17 @@
+ 
+ static irqreturn_t smb345_inok_isr(int irq, void *dev_id)
+ {
+-	SMB_NOTICE("VBUS_DET = %s\n", gpio_get_value(GPIO_AC_OK) ? "H" : "L");
++//  struct smb345_charger *smb = dev_id;
++    int status = gpio_get_value(GPIO_AC_OK);
++
++    SMB_NOTICE("smb345_inok_isr VBUS_DET = %s, ac_on=%d\n", status ? "H" : "L", ac_on);
++//	SMB_NOTICE("VBUS_DET = %s\n", gpio_get_value(GPIO_AC_OK) ? "H" : "L");
++
++    if(status) {
++        // power off
++        usbhost_poweroff_counter++;
++        wakeStartTP.tv_sec = 0l;
++    }
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -603,7 +629,7 @@
+ 	charger->wpc_curr_limit = 300;
+ 	charger->wpc_curr_limit_count = 0;
+ 	if (ac_on) {
+-		smb345_set_InputCurrentlimit(charger->client, 1200);
++		smb345_set_InputCurrentlimit(charger->client, MAX_FETCH_MA);
+ 		smb345_vflt_setting();
+ 	}
+ 	bq27541_wireless_callback(wireless_on);
+@@ -668,7 +694,7 @@
+ 
+ 			if ((retval & 0xF) <= 0x1) {
+ 				SMB_NOTICE("reconfig input current limit\n");
+-				smb345_set_InputCurrentlimit(client, 1200);
++				smb345_set_InputCurrentlimit(client, MAX_FETCH_MA);
+ 			}
+ 		}
+ 	}
+@@ -718,6 +744,7 @@
+ 		goto error;
+        }
+ 
++	if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
+ 	/* Change "OTG output current limit" to 250mA */
+       ret = smb345_write(client, smb345_OTG_TLIM_REG, 0x34);
+        if (ret < 0) {
+@@ -725,6 +752,7 @@
+ 			"register 0x%02x\n", __func__, smb345_OTG_TLIM_REG);
+ 		goto error;
+        }
++	}
+ 
+ 	/* Enable OTG */
+        ret = smb345_update_reg(client, smb345_CMD_REG, 0x10);
+@@ -734,6 +762,7 @@
+ 		goto error;
+        }
+ 
++	if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
+ 	/* Change "OTG output current limit" from 250mA to 750mA */
+ 	ret = smb345_update_reg(client, smb345_OTG_TLIM_REG, 0x08);
+        if (ret < 0) {
+@@ -741,6 +770,7 @@
+ 			"0x%02x\n", __func__, smb345_OTG_TLIM_REG);
+ 		goto error;
+        }
++	}
+ 
+ 	/* Change OTG to Pin control */
+        ret = smb345_write(client, smb345_CTRL_REG, 0x65);
+@@ -770,7 +800,7 @@
+ 	SMB_NOTICE("otg function: %s\n", on ? "on" : "off");
+ 
+ 	if (on) {
+-		otg_on = true;
++		//otg_on = true;
+ 		/* ENABLE OTG */
+ 		ret = smb345_configure_otg(client);
+ 		if (ret < 0) {
+@@ -778,11 +808,17 @@
+ 				"otg..\n", __func__);
+ 			return;
+ 		}
++        otg_on = true;
++        usbhost_hostmode = 1;
++        otg_plugged = true;
+ 		if (wireless_is_plugged())
+ 			wireless_reset();
+ 		return;
+-	} else
+-		otg_on = false;
++	} //else
++		
++	otg_on = false;
++	usbhost_hostmode = 0;
++    otg_plugged = false;
+ 
+ 	if (wireless_is_plugged())
+ 		wireless_set();
+@@ -853,15 +889,21 @@
+ 			}
+ 		}
+ 		success =  bq27541_battery_callback(non_cable);
++        usbhost_external_power = 0;
++        usbhost_charging_state = 0;
++        usbhost_fetching_ma = 0;
+ 		touch_callback(non_cable);
+ 	} else {
+ 		SMB_NOTICE("INOK=L\n");
+ 
++        usbhost_external_power = 1;
++        usbhost_charging_state = 1;
+ 		if (chgr_type == CHARGER_SDP) {
+ 			SMB_NOTICE("Cable: SDP\n");
+ 			smb345_vflt_setting();
+ 			success =  bq27541_battery_callback(usb_cable);
+ 			touch_callback(usb_cable);
++            smb345_set_InputCurrentlimit(client, 1200);
+ 		} else {
+ 			if (chgr_type == CHARGER_CDP) {
+ 				SMB_NOTICE("Cable: CDP\n");
+@@ -871,6 +913,7 @@
+ 				SMB_NOTICE("Cable: OTHER\n");
+ 			} else if (chgr_type == CHARGER_ACA) {
+ 				SMB_NOTICE("Cable: ACA\n");
++                usbhost_charging_state = 2;
+ 			} else {
+ 				SMB_NOTICE("Cable: TBD\n");
+ 				smb345_vflt_setting();
+@@ -878,7 +921,7 @@
+ 				touch_callback(usb_cable);
+ 				goto done;
+ 			}
+-			smb345_set_InputCurrentlimit(client, 1200);
++			smb345_set_InputCurrentlimit(client, MAX_FETCH_MA);
+ 			smb345_vflt_setting();
+ 			success =  bq27541_battery_callback(ac_cable);
+ 			touch_callback(ac_cable);
+@@ -905,6 +948,30 @@
+ }
+ EXPORT_SYMBOL_GPL(usb_cable_type_detect);
+ 
++
++void smb345_event_fi(void) {
++    // called by usbhost.c sysfs change from user space
++    if(usbhost_fixed_install_mode>0) {
++        // from OTG to FI: disable slave charging
++    } else {
++        // from FI to OTG: enable slave charging
++    }
++}
++//EXPORT_SYMBOL_GPL(smb345_event_fi);
++
++void smb345_event_fastcharge(void) {
++    // called by usbhost.c sysfs change from user space
++    if(usbhost_charging_state) {
++        if(usbhost_fastcharge_in_host_mode) {
++            usb_cable_type_detect(CHARGER_ACA);
++        } else {
++            usb_cable_type_detect(CHARGER_SDP);  // was CHARGER_DCP (in error)
++        }
++    }
++}
++//EXPORT_SYMBOL_GPL(smb345_event_fastcharge);
++
++
+ /* Sysfs function */
+ static ssize_t smb345_reg_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+@@ -970,6 +1037,7 @@
+ 		goto error;
+        }
+ 
++    if(!usbhost_fixed_install_mode && !usbhost_charging_state) {
+ 	/* Change "OTG output current limit" to 250mA */
+ 	ret = smb345_update_reg(client, smb345_OTG_TLIM_REG, 0x34);
+        if (ret < 0) {
+@@ -977,6 +1045,7 @@
+ 			"register 0x%02x\n", __func__, smb345_OTG_TLIM_REG);
+ 		goto error;
+        }
++	}
+ 
+ 	/* Disable volatile writes to registers */
+ 	ret = smb345_volatile_writes(client, smb345_DISABLE_WRITE);
+@@ -1353,6 +1422,8 @@
+ 
+ static int __init smb345_init(void)
+ {
++    lastPowerOn.tv_sec = 0l;
++    lastPowerOn.tv_nsec = 0l;
+ 	return i2c_add_driver(&smb345_i2c_driver);
+ }
+ module_init(smb345_init);
+diff -urH msm_orig/drivers/usb/otg/msm_otg.c msm/drivers/usb/otg/msm_otg.c
+--- msm_orig/drivers/usb/otg/msm_otg.c	2019-03-17 15:14:19.671325940 +0100
++++ msm/drivers/usb/otg/msm_otg.c	2019-03-19 22:45:45.758649653 +0100
+@@ -93,6 +93,17 @@
+ static int global_vbus_suspend_status;
+ static int global_id_pin_suspend_status;
+ 
++extern int usbhost_fixed_install_mode;
++extern int usbhost_fastcharge_in_host_mode;
++extern int usbhost_hostmode;
++extern int usbhost_charging_state;
++extern volatile int usbhost_external_power;
++extern volatile int usbhost_charge_slave_devices;
++extern volatile unsigned long usbhost_wake_in_suspend_total_ms;
++extern int usbhost_power_slaves;
++extern int usbhost_fetching_ma;
++bool volatile otg_plugged = false;
++bool volatile hostmodeStoppedOnSuspend = false;
+ /* APQ8064 GPIO pin definition */
+ #define APQ_AP_ACOK	23
+ #define APQ_OTG_ID_PIN	77
+@@ -135,6 +146,7 @@
+ {
+ 	int chg_type = chg_src;
+ 
++
+ 	if (old_chg_type == chg_type) {
+ 		printk(KERN_INFO "The USB charging type is same : return\n");
+ 		return;
+@@ -394,7 +406,7 @@
+ 	.write = ulpi_write,
+ };
+ 
+-static int otg_host_on = 0;
++//static int otg_host_on = 0;
+ static void ulpi_init(struct msm_otg *motg)
+ {
+ 	struct msm_otg_platform_data *pdata = motg->pdata;
+@@ -406,7 +418,8 @@
+ 	while (seq[0] >= 0) {
+ 		dev_vdbg(motg->phy.dev, "ulpi: write 0x%02x to 0x%02x\n",
+ 				seq[0], seq[1]);
+-		if (otg_host_on == 1 && seq[1] == 0x81) {
++//		if (otg_host_on == 1 && seq[1] == 0x81) {
++		if (usbhost_hostmode>0 && seq[1] == 0x81) {
+ 			if (machine_is_apq8064_flo()) {
+ 				printk(KERN_INFO"Host mode: Set DC level as 0x68 for flo.\n");
+ 				ulpi_write(&motg->phy, 0x68, seq[1]);
+@@ -865,11 +878,17 @@
+ 	 * 2. host mode activation in progress due to Micro-A cable insertion
+ 	 */
+ 
+-	if ((test_bit(B_SESS_VLD, &motg->inputs) && !device_bus_suspend &&
+-		!dcp) || test_bit(A_BUS_REQ, &motg->inputs)) {
++	if ((test_bit(B_SESS_VLD, &motg->inputs) && !device_bus_suspend &&	!dcp) || test_bit(A_BUS_REQ, &motg->inputs)) {
+ 		enable_irq(motg->irq);
+ 		return -EBUSY;
+ 	}
++	
++		if (test_bit(A_BUS_REQ, &motg->inputs)) {
++		if(!usbhost_fixed_install_mode) {
++			enable_irq(motg->irq);
++			return -EBUSY;
++		}
++	}
+ 
+ 	/*
+ 	 * Chipidea 45-nm PHY suspend sequence:
+@@ -914,7 +933,7 @@
+ 	}
+ 
+ 	if (cnt >= PHY_SUSPEND_TIMEOUT_USEC) {
+-		dev_err(phy->dev, "Unable to suspend PHY\n");
++		//dev_err(phy->dev, "Unable to suspend PHY\n");
+ 		msm_otg_reset(phy);
+ 		enable_irq(motg->irq);
+ 		return -ETIMEDOUT;
+@@ -1023,6 +1042,8 @@
+ 	u32 phy_ctrl_val = 0;
+ 	unsigned ret;
+ 
++	dev_info(phy->dev, "#:# msm_otg_resume\n");
++
+ 	if (!atomic_read(&motg->in_lpm))
+ 		return 0;
+ 
+@@ -1159,6 +1180,7 @@
+ 	 * TODO
+ 	 * Unify OTG driver charger types and power supply charger types
+ 	 */
++	asus_chg_set_chg_mode(motg->chg_type);
+ 
+ 	if (motg->chg_type == USB_SDP_CHARGER)
+ 		charger_type = POWER_SUPPLY_TYPE_USB;
+@@ -1172,9 +1194,10 @@
+ 		motg->chg_type == USB_ACA_B_CHARGER ||
+ 		motg->chg_type == USB_ACA_C_CHARGER))
+ 		charger_type = POWER_SUPPLY_TYPE_USB_ACA;
+-	else
++	else {
+ 		charger_type = POWER_SUPPLY_TYPE_BATTERY;
+-
++		return 0;
++	}
+ 	return pm8921_set_usb_power_supply_type(charger_type);
+ }
+ 
+@@ -1184,16 +1207,20 @@
+ 	if (!psy)
+ 		goto psy_not_supported;
+ 
+-	if (motg->cur_power == 0 && mA > 0) {
+-		/* Enable charging */
+-		if (power_supply_set_online(psy, true))
+-			goto psy_not_supported;
+-	} else if (motg->cur_power > 0 && mA == 0) {
+-		/* Disable charging */
+-		if (power_supply_set_online(psy, false))
+-			goto psy_not_supported;
++	if(mA<=0) {
++		usbhost_charging_state = 0;
++		usbhost_fetching_ma = 0;
++		if (motg->cur_power > 0) {
++			if (power_supply_set_online(psy, false))
++				goto psy_not_supported;
++		}
+ 		return 0;
+ 	}
++
++	if(usbhost_charging_state<=0)
++		usbhost_charging_state = 1;
++	usbhost_fetching_ma = mA;
++
+ 	/* Set max current limit */
+ 	dev_info(motg->phy.dev, "current: %d -> %d (mA)\n",
+ 			motg->cur_power, mA);
+@@ -1214,12 +1241,20 @@
+ 	if (g && g->is_a_peripheral)
+ 		return;
+ 
++
++	dev_info(motg->phy.dev, "Requested notify current is %u mA\n", mA);
++
+ 	if ((motg->chg_type == USB_ACA_DOCK_CHARGER ||
+ 		motg->chg_type == USB_ACA_A_CHARGER ||
+ 		motg->chg_type == USB_ACA_B_CHARGER ||
+ 		motg->chg_type == USB_ACA_C_CHARGER) &&
+-			mA > IDEV_ACA_CHG_LIMIT)
+-		mA = IDEV_ACA_CHG_LIMIT;
++			mA > IDEV_ACA_CHG_LIMIT) {
++	    if(usbhost_fastcharge_in_host_mode) {
++	    } else {
++	    	if(mA>0)
++			    mA = IDEV_ACA_CHG_LIMIT;
++	    }
++	}
+ 
+ 	if (msm_otg_notify_chg_type(motg))
+ 		dev_err(motg->phy.dev,
+@@ -1254,6 +1289,95 @@
+ 	return 0;
+ }
+ 
++static void msm_hsusb_vbus_power(struct msm_otg *motg, bool on)
++{
++	int ret;
++	static bool vbus_is_on;
++
++	if(on && usbhost_fixed_install_mode) {
++		if (vbus_is_on) {
++			ret = motg->pdata->vbus_power(false);
++			vbus_is_on = false;
++		}
++		usbhost_charge_slave_devices = 0;
++
++		set_bit(ID, &motg->inputs);
++		clear_bit(B_SESS_VLD, &motg->inputs);
++		hostmodeStoppedOnSuspend = true;
++	    return;
++	}
++
++	if(on && usbhost_power_slaves==0) {
++		if (vbus_is_on) {
++			ret = motg->pdata->vbus_power(false);
++			vbus_is_on = false;
++		}
++
++		usbhost_charge_slave_devices = 0;
++
++		set_bit(ID, &motg->inputs);
++		clear_bit(B_SESS_VLD, &motg->inputs);
++		hostmodeStoppedOnSuspend = true;
++	    return;
++	}
++
++	if (vbus_is_on == on) {
++		if(!on) {
++			usbhost_charge_slave_devices = 0;
++		}
++		return;
++	}
++
++	if (motg->pdata->vbus_power) {
++		ret = motg->pdata->vbus_power(on);
++		if (!ret) {
++			vbus_is_on = on;
++			if(on)
++				usbhost_charge_slave_devices = 1;
++			else
++				usbhost_charge_slave_devices = 0;
++		}
++		return;
++	}
++
++	/*
++	 * if entering host mode tell the charger to not draw any current
++	 * from usb before turning on the boost.
++	 * if exiting host mode disable the boost before enabling to draw
++	 * current from the source.
++	 */
++	if (on) {
++		// we are trying to power slave devices from battery
++		msm_otg_notify_host_mode(motg, true);
++		if (!vbus_otg) {
++			smb345_otg_status(true);
++			usbhost_charge_slave_devices = 1;
++		} else {
++			ret = regulator_enable(vbus_otg);
++			if (ret) {
++				return;
++			}
++			vbus_is_on = true;
++			usbhost_charge_slave_devices = 1;
++		}
++	} else {
++		if (!vbus_otg) {
++			usbhost_charge_slave_devices = 0;
++		} else {
++			ret = regulator_disable(vbus_otg);
++			if (ret) {
++				return;
++			}
++
++			if(!usbhost_fixed_install_mode) {
++				// only if FI-mode is off, do we want to disable host mode
++				msm_otg_notify_host_mode(motg, on);	// here, on is actually off
++			}
++			vbus_is_on = false;
++			usbhost_charge_slave_devices = 0;
++		}
++	}
++}
+ static void msm_otg_start_host(struct usb_otg *otg, int on)
+ {
+ 	struct msm_otg *motg = container_of(otg->phy, struct msm_otg, phy);
+@@ -1268,7 +1392,7 @@
+ 	if (on) {
+ 		dev_dbg(otg->phy->dev, "host on\n");
+ 		smb345_otg_status(true);
+-		otg_host_on = 1;
++		//otg_host_on = 1;
+ 
+ 		// Reset to apply new parameter for host.
+ 		msm_otg_reset(otg->phy);
+@@ -1300,7 +1424,10 @@
+ 				ULPI_CLR(ULPI_PWR_CLK_MNG_REG));
+ 
+ 		smb345_otg_status(false);
+-		otg_host_on = 0;
++		//otg_host_on = 0;
++	    if(usbhost_charge_slave_devices) {
++			msm_hsusb_vbus_power(motg, 0);
++		}
+ 	}
+ }
+ 
+@@ -1378,50 +1505,7 @@
+ 	return NOTIFY_OK;
+ }
+ 
+-static void msm_hsusb_vbus_power(struct msm_otg *motg, bool on)
+-{
+-	int ret;
+-	static bool vbus_is_on;
+-
+-	if (vbus_is_on == on)
+-		return;
+ 
+-	if (motg->pdata->vbus_power) {
+-		ret = motg->pdata->vbus_power(on);
+-		if (!ret)
+-			vbus_is_on = on;
+-		return;
+-	}
+-
+-	if (!vbus_otg) {
+-		pr_err("vbus_otg is NULL.");
+-		return;
+-	}
+-
+-	/*
+-	 * if entering host mode tell the charger to not draw any current
+-	 * from usb before turning on the boost.
+-	 * if exiting host mode disable the boost before enabling to draw
+-	 * current from the source.
+-	 */
+-	if (on) {
+-		msm_otg_notify_host_mode(motg, on);
+-		ret = regulator_enable(vbus_otg);
+-		if (ret) {
+-			pr_err("unable to enable vbus_otg\n");
+-			return;
+-		}
+-		vbus_is_on = true;
+-	} else {
+-		ret = regulator_disable(vbus_otg);
+-		if (ret) {
+-			pr_err("unable to disable vbus_otg\n");
+-			return;
+-		}
+-		msm_otg_notify_host_mode(motg, on);
+-		vbus_is_on = false;
+-	}
+-}
+ 
+ static int msm_otg_set_host(struct usb_otg *otg, struct usb_bus *host)
+ {
+@@ -2180,6 +2264,7 @@
+ 		if (slimport_is_connected()) {
+ 			msm_chg_block_off(motg);
+ 			motg->chg_state = USB_CHG_STATE_DETECTED;
++			dev_info(phy->dev, "SDP setup: WAIT_FOR_DCD\n");
+ 			motg->chg_type = USB_SDP_CHARGER;
+ 			queue_delayed_work(system_nrt_wq, &motg->chg_work, 0);
+ 			return;
+@@ -2205,6 +2290,10 @@
+ 			}
+ 		}
+ 		is_dcd = msm_chg_check_dcd(motg);
++		if(is_dcd) {
++        	} else if(usbhost_fixed_install_mode && usbhost_external_power) {
++	            is_dcd=true;
++        	}
+ 		motg->dcd_time += MSM_CHG_DCD_POLL_TIME;
+ 		tmout = motg->dcd_time >= MSM_CHG_DCD_TIMEOUT;
+ 		if (is_dcd || tmout) {
+@@ -2218,6 +2307,9 @@
+ 		break;
+ 	case USB_CHG_STATE_DCD_DONE:
+ 		vout = msm_chg_check_primary_det(motg);
++		if(vout && usbhost_fixed_install_mode && !usbhost_external_power) {
++		    vout=false;
++		}
+ 		line_state = readl_relaxed(USB_PORTSC) & PORTSC_LS;
+ 		dm_vlgc = line_state & PORTSC_LS_DM;
+ 		if (vout && !dm_vlgc) { /* VDAT_REF < DM < VLGC */
+@@ -2244,10 +2336,42 @@
+ 				break;
+ 			}
+ 
+-			if (line_state) /* DP > VLGC or/and DM > VLGC */
+-				motg->chg_type = USB_PROPRIETARY_CHARGER;
+-			else
+-				motg->chg_type = USB_SDP_CHARGER;
++			if (line_state) { /* DP > VLGC or/and DM > VLGC */
++  	 	        	set_bit(ID_A, &motg->inputs);
++
++				if(usbhost_fastcharge_in_host_mode) {
++	  	 	        	motg->chg_type = USB_ACA_A_CHARGER;
++					} else {
++						dev_info(phy->dev, "SDP setup: usbhost 1\n");
++						motg->chg_type = USB_SDP_CHARGER;
++					}
++  	 		}
++			else {
++				//struct msm_otg *motg = the_msm_otg;
++				//struct usb_otg *otg = motg->phy.otg;
++				//bool otg_mode = test_bit(ID_A, &motg->inputs);
++
++				if(usbhost_external_power>0) {
++					if(otg_plugged) {
++		  	 	        set_bit(ID_A, &motg->inputs);
++		  	 	        
++						if(usbhost_fastcharge_in_host_mode) {
++			  	 	        motg->chg_type = USB_ACA_A_CHARGER;
++						} else {
++							dev_info(phy->dev, "SDP setup: usbhost 2\n");
++							motg->chg_type = USB_SDP_CHARGER;
++						}
++
++					} else {
++							dev_info(phy->dev, "SDP setup: usbhost 3\n");
++						motg->chg_type = USB_SDP_CHARGER;
++					}
++
++				} else {
++					// this is unpowered OTG
++					motg->chg_type = USB_INVALID_CHARGER;
++				}
++			}
+ 
+ 			motg->chg_state = USB_CHG_STATE_DETECTED;
+ 			delay = 0;
+@@ -2392,6 +2516,7 @@
+ 		} else if ((!test_bit(ID, &motg->inputs) ||
+ 				test_bit(ID_A, &motg->inputs)) && otg->host) {
+ 			pr_debug("!id || id_A\n");
++			otg_plugged = false;
+ 			if (slimport_is_connected()) {
+ 				work = 1;
+ 				break;
+@@ -2400,12 +2525,14 @@
+ 				work = 1;
+ 				break;
+ 			}
++otg_plugged = true;
+ 			clear_bit(B_BUS_REQ, &motg->inputs);
+ 			set_bit(A_BUS_REQ, &motg->inputs);
+ 			otg->phy->state = OTG_STATE_A_IDLE;
++			msm_chg_detect_work(&motg->chg_work.work);
+ 			work = 1;
+ 		} else if (test_bit(B_SESS_VLD, &motg->inputs)) {
+-			pr_debug("b_sess_vld\n");
++			//pr_debug("b_sess_vld\n");
+ 			switch (motg->chg_state) {
+ 			case USB_CHG_STATE_UNDEFINED:
+ 				msm_chg_detect_work(&motg->chg_work.work);
+@@ -2461,7 +2588,7 @@
+ 				break;
+ 			}
+ 		} else if (test_bit(B_BUS_REQ, &motg->inputs)) {
+-			pr_debug("b_sess_end && b_bus_req\n");
++			//pr_debug("b_sess_end && b_bus_req\n");
+ 			if (msm_otg_start_srp(otg) < 0) {
+ 				clear_bit(B_BUS_REQ, &motg->inputs);
+ 				work = 1;
+@@ -2480,6 +2607,10 @@
+ 			asus_chg_set_chg_mode(USB_INVALID_CHARGER);
+ 			msm_otg_notify_charger(motg, 0);
+ 			msm_otg_reset(otg->phy);
++			smb345_otg_status(false);
++			if(usbhost_charge_slave_devices) {
++				msm_hsusb_vbus_power(motg, 0);
++			}
+ 			/*
+ 			 * There is a small window where ID interrupt
+ 			 * is not monitored during ID detection circuit
+@@ -2642,7 +2773,7 @@
+ 		otg->default_a = 1;
+ 		if (test_bit(ID, &motg->inputs) &&
+ 			!test_bit(ID_A, &motg->inputs)) {
+-			pr_debug("id && !id_a\n");
++			//pr_debug("id && !id_a\n");
+ 			otg->default_a = 0;
+ 			clear_bit(A_BUS_DROP, &motg->inputs);
+ 			otg->phy->state = OTG_STATE_B_IDLE;
+@@ -2654,7 +2785,7 @@
+ 		} else if (!test_bit(A_BUS_DROP, &motg->inputs) &&
+ 				(test_bit(A_SRP_DET, &motg->inputs) ||
+ 				 test_bit(A_BUS_REQ, &motg->inputs))) {
+-			pr_debug("!a_bus_drop && (a_srp_det || a_bus_req)\n");
++			//pr_debug("!a_bus_drop && (a_srp_det || a_bus_req)\n");
+ 
+ 			clear_bit(A_SRP_DET, &motg->inputs);
+ 			/* Disable SRP detection */
+@@ -2662,17 +2793,43 @@
+ 					~OTGSC_INTSTS_MASK) &
+ 					~OTGSC_DPIE, USB_OTGSC);
+ 
+-			otg->phy->state = OTG_STATE_A_WAIT_VRISE;
+-			/* VBUS should not be supplied before end of SRP pulse
+-			 * generated by PET, if not complaince test fail.
+-			 */
+-			usleep_range(10000, 12000);
+-			/* ACA: ID_A: Stop charging untill enumeration */
+-			if (test_bit(ID_A, &motg->inputs))
++			//usleep_range(10000, 12000);
++			msleep(1000);
++			/* ACA: ID_A: Stop charging until enumeration */
++			if (test_bit(ID_A, &motg->inputs)) {
+ 				msm_otg_notify_charger(motg, 0);
+-			else
+-				msm_hsusb_vbus_power(motg, 1);
+-			msm_otg_start_timer(motg, TA_WAIT_VRISE, A_WAIT_VRISE);
++
++				otg->phy->state = OTG_STATE_A_WAIT_VRISE;
++				msm_otg_start_timer(motg, TA_WAIT_VRISE, A_WAIT_VRISE);
++			} else if(usbhost_external_power>0) {
++				motg->chg_state = USB_CHG_STATE_DETECTED;
++
++				smb345_otg_status(true);
++
++				if(usbhost_fastcharge_in_host_mode) {
++		 	        motg->chg_type = USB_ACA_A_CHARGER;
++	  	            msm_otg_notify_charger(motg, IDEV_ACA_CHG_MAX);
++				} else {
++					dev_info((&motg->phy)->dev, "SDP setup: usbhost 4\n");
++					motg->chg_type = USB_SDP_CHARGER;
++	  	            msm_otg_notify_charger(motg, IDEV_CHG_MIN);
++				}
++
++			} else {
++		        if(usbhost_fixed_install_mode) {
++				    msm_hsusb_vbus_power(motg, 1);
++					msm_otg_suspend(motg);
++
++		        } else {
++		        	if(motg->chg_type!=USB_INVALID_CHARGER) {
++		        	} else {
++						msm_hsusb_vbus_power(motg, 1);
++						otg->phy->state = OTG_STATE_A_WAIT_VRISE;
++						msm_otg_start_timer(motg, TA_WAIT_VRISE, A_WAIT_VRISE);
++						usbhost_charge_slave_devices = 1;
++					}
++				}
++			}
+ 		} else {
+ 			pr_debug("No session requested\n");
+ 			clear_bit(A_BUS_DROP, &motg->inputs);
+@@ -2698,14 +2855,14 @@
+ 				!test_bit(ID_A, &motg->inputs)) ||
+ 				test_bit(A_BUS_DROP, &motg->inputs) ||
+ 				test_bit(A_WAIT_VRISE, &motg->tmouts)) {
+-			pr_debug("id || a_bus_drop || a_wait_vrise_tmout\n");
++			//pr_debug("id || a_bus_drop || a_wait_vrise_tmout\n");
+ 			clear_bit(A_BUS_REQ, &motg->inputs);
+ 			msm_otg_del_timer(motg);
+ 			msm_hsusb_vbus_power(motg, 0);
+ 			otg->phy->state = OTG_STATE_A_WAIT_VFALL;
+ 			msm_otg_start_timer(motg, TA_WAIT_VFALL, A_WAIT_VFALL);
+ 		} else if (test_bit(A_VBUS_VLD, &motg->inputs)) {
+-			pr_debug("a_vbus_vld\n");
++			//pr_debug("a_vbus_vld\n");
+ 			otg->phy->state = OTG_STATE_A_WAIT_BCON;
+ 			if (TA_WAIT_BCON > 0)
+ 				msm_otg_start_timer(motg, TA_WAIT_BCON,
+@@ -2719,6 +2876,9 @@
+ 		}
+ 		break;
+ 	case OTG_STATE_A_WAIT_BCON:
++        if(motg->chg_type==USB_ACA_A_CHARGER) {
++        	break;
++        }
+ 		if ((test_bit(ID, &motg->inputs) &&
+ 				!test_bit(ID_A, &motg->inputs)) ||
+ 				test_bit(A_BUS_DROP, &motg->inputs) ||
+@@ -2744,7 +2904,7 @@
+ 			otg->phy->state = OTG_STATE_A_WAIT_VFALL;
+ 			msm_otg_start_timer(motg, TA_WAIT_VFALL, A_WAIT_VFALL);
+ 		} else if (!test_bit(A_VBUS_VLD, &motg->inputs)) {
+-			pr_debug("!a_vbus_vld\n");
++		//	pr_debug("!a_vbus_vld\n");
+ 			clear_bit(B_CONN, &motg->inputs);
+ 			msm_otg_del_timer(motg);
+ 			msm_otg_start_host(otg, 0);
+@@ -2757,8 +2917,15 @@
+ 			 * If TA_WAIT_BCON is infinite, we don;t
+ 			 * turn off VBUS. Enter low power mode.
+ 			 */
+-			if (TA_WAIT_BCON < 0)
++			if (TA_WAIT_BCON < 0) {
+ 				pm_runtime_put_sync(otg->phy->dev);
++				
++				if(otg_plugged && usbhost_fixed_install_mode && !hostmodeStoppedOnSuspend) {
++					hostmodeStoppedOnSuspend = true;
++					set_bit(ID, &motg->inputs);
++					clear_bit(B_SESS_VLD, &motg->inputs);
++				}
++			}
+ 		} else if (!test_bit(ID, &motg->inputs)) {
+ 			msm_hsusb_vbus_power(motg, 1);
+ 		}
+@@ -2800,20 +2967,23 @@
+ 			pr_debug("!b_conn\n");
+ 			msm_otg_del_timer(motg);
+ 			otg->phy->state = OTG_STATE_A_WAIT_BCON;
+-			if (TA_WAIT_BCON > 0)
++			if (TA_WAIT_BCON > 0) {
+ 				msm_otg_start_timer(motg, TA_WAIT_BCON,
+ 					A_WAIT_BCON);
++		}
+ 			if (msm_chg_check_aca_intr(motg))
+ 				work = 1;
+ 		} else if (test_bit(ID_A, &motg->inputs)) {
+ 			msm_otg_del_timer(motg);
+ 			msm_hsusb_vbus_power(motg, 0);
++			if(usbhost_charging_state) {
+ 			if (motg->chg_type == USB_ACA_DOCK_CHARGER)
+ 				msm_otg_notify_charger(motg,
+ 						IDEV_ACA_CHG_MAX);
+ 			else
+ 				msm_otg_notify_charger(motg,
+ 						IDEV_CHG_MIN - motg->mA_port);
++			}
+ 		} else if (!test_bit(ID, &motg->inputs)) {
+ 			motg->chg_state = USB_CHG_STATE_UNDEFINED;
+ 			motg->chg_type = USB_INVALID_CHARGER;
+@@ -3107,16 +3277,51 @@
+ 	struct msm_otg *motg = the_msm_otg;
+ 	struct usb_otg *otg = motg->phy.otg;
+ 
+-	/* In A Host Mode, ignore received BSV interrupts */
+-	if (otg->phy->state >= OTG_STATE_A_IDLE)
+-		return;
+-
+ 	if (online) {
++		if(usbhost_charge_slave_devices) {
++	    	return;
++		}
++
+ 		pr_debug("PMIC: BSV set\n");
+ 		set_bit(B_SESS_VLD, &motg->inputs);
++		usbhost_external_power = 1;
++
++		if(hostmodeStoppedOnSuspend) {
++			hostmodeStoppedOnSuspend = false;
++			clear_bit(ID, &motg->inputs);
++			//set_bit(B_SESS_VLD, &motg->inputs);
++		}
++
++
++		if (otg->phy->state > OTG_STATE_A_IDLE && !usbhost_charge_slave_devices) {
++		    set_bit(ID_A, &motg->inputs);
++		    motg->chg_state = USB_CHG_STATE_DETECTED;
++			if(usbhost_fastcharge_in_host_mode) {
++	 	        motg->chg_type = USB_ACA_A_CHARGER;
++			} else {
++				dev_info((&motg->phy)->dev, "SDP setup: usbhost 5\n");
++				motg->chg_type = USB_SDP_CHARGER;
++			}
++			asus_chg_set_chg_mode(motg->chg_type);
++		}
++
+ 	} else {
+ 		pr_debug("PMIC: BSV clear\n");
+ 		clear_bit(B_SESS_VLD, &motg->inputs);
++
++		if (otg->phy->state >= OTG_STATE_A_IDLE) {
++		    clear_bit(ID_A, &motg->inputs);
++  	        motg->chg_state = USB_CHG_STATE_UNDEFINED;
++			motg->chg_type = USB_INVALID_CHARGER;
++			asus_chg_set_chg_mode(motg->chg_type);
++
++			// need to sleep a bit, so that new usbhost_hostmode state may become available
++			msleep(200);
++
++			if(!usbhost_fixed_install_mode && usbhost_hostmode>0 && usbhost_power_slaves>0) {
++				msm_hsusb_vbus_power(motg, 1);
++			}
++		}
+ 	}
+ 
+ 	if (!init) {
+@@ -3132,10 +3337,11 @@
+ 		return;
+ 	}
+ 
+-	if (atomic_read(&motg->pm_suspended))
++	if (atomic_read(&motg->pm_suspended)) {
+ 		motg->sm_work_pending = true;
+-	else
++	} else {
+ 		queue_work(system_nrt_wq, &motg->sm_work);
++	}
+ }
+ 
+ static void (*notify_vbus_state_func_ptr)(int);
+@@ -3161,13 +3367,13 @@
+ 		pr_info("%s: slimport_is_connected\n", __func__);
+ 	else {
+ 		pr_debug("%s: gpio_get_value(APQ_OTG_ID_PIN) = %d\n", __func__, gpio_get_value(APQ_OTG_ID_PIN));
+-		if (gpio == 0 && otg_host_on == 0) {
++		if (gpio == 0 && usbhost_hostmode == 0) {
+ 			pr_info("%s: APQ_OTG_ID_PIN is low : Host mode\n", __func__);
+ 			set_bit(A_BUS_REQ, &motg->inputs);
+ 			clear_bit(ID, &motg->inputs);
+ 			pm_runtime_resume(phy->dev);
+ 			queue_work(system_nrt_wq, &motg->sm_work);
+-		} else if (otg_host_on == 1 && gpio == 1){
++		} else if (usbhost_hostmode>0 && gpio == 1){
+ 			pr_info("%s: APQ_OTG_ID_PIN is high : leave Host mode\n", __func__);
+ 			set_bit(ID, &motg->inputs);
+ 			clear_bit(B_SESS_VLD, &motg->inputs);
+@@ -4231,7 +4437,7 @@
+ {
+ 	struct msm_otg *motg = dev_get_drvdata(dev);
+ 
+-	dev_dbg(dev, "OTG runtime suspend\n");
++	//dev_dbg(dev, "OTG runtime suspend\n");
+ 	return msm_otg_suspend(motg);
+ }
+ 
+@@ -4253,7 +4459,7 @@
+ 	unsigned id_gpio = APQ_OTG_ID_PIN, vbus_det_gpio = APQ_AP_ACOK;
+ 
+ 
+-	dev_dbg(dev, "OTG PM suspend\n");
++	//dev_dbg(dev, "OTG PM suspend\n");
+ 
+ 	atomic_set(&motg->pm_suspended, 1);
+ 	ret = msm_otg_suspend(motg);
+Binary files msm_orig/.git/index and msm/.git/index differ
